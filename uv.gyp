@@ -453,6 +453,7 @@
         'test/benchmark-million-timers.c',
         'test/benchmark-multi-accept.c',
         'test/benchmark-ping-pongs.c',
+        'test/benchmark-ping-udp.c',
         'test/benchmark-pound.c',
         'test/benchmark-pump.c',
         'test/benchmark-sizes.c',

@@ -133,6 +133,13 @@ static void echo_alloc(uv_handle_t* handle,
   buf->len = suggested_size;
 }
 
+static void slab_alloc(uv_handle_t* handle,
+                       size_t suggested_size,
+                       uv_buf_t* buf) {
+  static char slab[8 * 64 * 1024];
+  buf->base = slab;
+  buf->len = sizeof(slab);
+}
 
 static void on_connection(uv_stream_t* server, int status) {
   uv_stream_t* stream;
@@ -286,7 +293,7 @@ static int udp4_echo_start(int port) {
     return 1;
   }
 
-  r = uv_udp_recv_start(&udpServer, echo_alloc, on_recv);
+  r = uv_udp_recv_start(&udpServer, slab_alloc, on_recv);
   if (r) {
     fprintf(stderr, "uv_udp_recv_start: %s\n", uv_strerror(r));
     return 1;

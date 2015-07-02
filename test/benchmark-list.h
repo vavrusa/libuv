@@ -23,6 +23,9 @@ BENCHMARK_DECLARE (sizes)
 BENCHMARK_DECLARE (loop_count)
 BENCHMARK_DECLARE (loop_count_timed)
 BENCHMARK_DECLARE (ping_pongs)
+BENCHMARK_DECLARE (ping_udp1)
+BENCHMARK_DECLARE (ping_udp10)
+BENCHMARK_DECLARE (ping_udp100)
 BENCHMARK_DECLARE (tcp_write_batch)
 BENCHMARK_DECLARE (tcp4_pound_100)
 BENCHMARK_DECLARE (tcp4_pound_1000)
@@ -79,6 +82,7 @@ HELPER_DECLARE    (tcp4_blackhole_server)
 HELPER_DECLARE    (tcp_pump_server)
 HELPER_DECLARE    (pipe_pump_server)
 HELPER_DECLARE    (tcp4_echo_server)
+HELPER_DECLARE    (udp4_echo_server)
 HELPER_DECLARE    (pipe_echo_server)
 HELPER_DECLARE    (dns_server)
 
@@ -89,6 +93,15 @@ TASK_LIST_START
 
   BENCHMARK_ENTRY  (ping_pongs)
   BENCHMARK_HELPER (ping_pongs, tcp4_echo_server)
+
+  BENCHMARK_ENTRY  (ping_udp1)
+  BENCHMARK_HELPER (ping_udp1, udp4_echo_server)
+
+  BENCHMARK_ENTRY  (ping_udp10)
+  BENCHMARK_HELPER (ping_udp10, udp4_echo_server)
+
+  BENCHMARK_ENTRY  (ping_udp100)
+  BENCHMARK_HELPER (ping_udp100, udp4_echo_server)
 
   BENCHMARK_ENTRY  (tcp_write_batch)
   BENCHMARK_HELPER (tcp_write_batch, tcp4_blackhole_server)
