@@ -178,34 +178,24 @@ static void on_server_close(uv_handle_t* handle) {
   ASSERT(handle == server);
 }
 
-
-static void on_send(uv_udp_send_t* req, int status);
-
-
 static void on_recv(uv_udp_t* handle,
                     ssize_t nread,
                     const uv_buf_t* rcvbuf,
                     const struct sockaddr* addr,
                     unsigned flags) {
-  uv_udp_send_t* req;
   uv_buf_t sndbuf;
+
+  if (nread == 0) {
+    /* Everything OK, but nothing read. */
+    return;
+  }
 
   ASSERT(nread > 0);
   ASSERT(addr->sa_family == AF_INET);
 
-  req = malloc(sizeof(*req));
-  ASSERT(req != NULL);
-
-  sndbuf = *rcvbuf;
-  ASSERT(0 == uv_udp_send(req, handle, &sndbuf, 1, addr, on_send));
+  sndbuf = uv_buf_init(rcvbuf->base, nread);
+  ASSERT(0 <= uv_udp_try_send(handle, &sndbuf, 1, addr));
 }
-
-
-static void on_send(uv_udp_send_t* req, int status) {
-  ASSERT(status == 0);
-  free(req);
-}
-
 
 static int tcp4_echo_start(int port) {
   struct sockaddr_in addr;
@@ -277,14 +267,22 @@ static int tcp6_echo_start(int port) {
 
 
 static int udp4_echo_start(int port) {
+  struct sockaddr_in addr;
   int r;
 
+  ASSERT(0 == uv_ip4_addr("0.0.0.0", port, &addr));
   server = (uv_handle_t*)&udpServer;
   serverType = UDP;
 
   r = uv_udp_init(loop, &udpServer);
   if (r) {
     fprintf(stderr, "uv_udp_init: %s\n", uv_strerror(r));
+    return 1;
+  }
+
+  r = uv_udp_bind(&udpServer, (const struct sockaddr*) &addr, 0);
+  if (r) {
+    fprintf(stderr, "uv_udp_bind: %s\n", uv_strerror(r));
     return 1;
   }
 
