@@ -44,32 +44,19 @@ static char PING[] = "PING\n";
 
 static uv_loop_t* loop;
 
-static buf_t* buf_freelist = NULL;
 static int completed_pingers = 0;
 static unsigned long completed_pings = 0;
 static int64_t start_time;
 
 
 static void buf_alloc(uv_handle_t* tcp, size_t size, uv_buf_t* buf) {
-  buf_t* ab;
-
-  ab = buf_freelist;
-  if (ab != NULL)
-    buf_freelist = ab->next;
-  else {
-    ab = malloc(size + sizeof(*ab));
-    ab->uv_buf_t.len = size;
-    ab->uv_buf_t.base = (char*) (ab + 1);
-  }
-
-  *buf = ab->uv_buf_t;
+  static char slab[64 * 1024];
+  buf->base = slab;
+  buf->len = sizeof(slab);
 }
 
 
 static void buf_free(const uv_buf_t* buf) {
-  buf_t* ab = (buf_t*) buf->base - 1;
-  ab->next = buf_freelist;
-  buf_freelist = ab;
 }
 
 
@@ -95,7 +82,6 @@ static void pinger_write_ping(pinger_t* pinger) {
   if (r < 0) {
     FATAL("uv_udp_send failed");
   }
-
 }
 
 static void pinger_read_cb(uv_udp_t* udp,

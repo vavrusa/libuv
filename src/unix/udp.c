@@ -28,6 +28,13 @@
 #include <stdlib.h>
 #include <unistd.h>
 
+#define UDP_DGRAM_MAXSIZE (64 * 1024)
+#if defined(MSG_WAITFORONE)
+#define MMSG_MAXWIDTH 20
+#define ENABLE_RECVMMSG 1
+#define ENABLE_SENDMMSG 1
+#endif
+
 #if defined(IPV6_JOIN_GROUP) && !defined(IPV6_ADD_MEMBERSHIP)
 # define IPV6_ADD_MEMBERSHIP IPV6_JOIN_GROUP
 #endif
@@ -144,6 +151,55 @@ static void uv__udp_io(uv_loop_t* loop, uv__io_t* w, unsigned int revents) {
   }
 }
 
+#if ENABLE_RECVMMSG
+static void uv__udp_recvmmsg(uv_udp_t* handle, uv_buf_t *buf)
+{
+  struct sockaddr_in6 peers[MMSG_MAXWIDTH];
+  struct iovec iov[MMSG_MAXWIDTH];
+  struct mmsghdr msgs[MMSG_MAXWIDTH];
+  ssize_t nread;
+  uv_buf_t chunk_buf;
+  int chunks;
+  int flags;
+  int k;
+
+  /* prepare structures for recvmmsg */
+  chunks = buf->len / UDP_DGRAM_MAXSIZE;
+  if (chunks > MMSG_MAXWIDTH)
+    chunks = MMSG_MAXWIDTH;
+  for (k = 0; k < chunks; ++k) {
+    iov[k].iov_base = buf->base + k * UDP_DGRAM_MAXSIZE;
+    iov[k].iov_len = UDP_DGRAM_MAXSIZE;
+    msgs[k].msg_hdr.msg_iov = iov + k;
+    msgs[k].msg_hdr.msg_iovlen = 1;
+    msgs[k].msg_hdr.msg_name = peers + k;
+    msgs[k].msg_hdr.msg_namelen = sizeof(peers[0]);
+  }
+
+  do {
+    nread = recvmmsg(handle->io_watcher.fd, msgs, chunks, 0, NULL);
+  }
+  while (nread == -1 && errno == EINTR);
+
+  if (nread < 1) {
+    if (nread == 0 || errno == EAGAIN || errno == EWOULDBLOCK)
+      handle->recv_cb(handle, 0, buf, NULL, 0);
+    else
+      handle->recv_cb(handle, -errno, buf, NULL, 0);
+  }
+  else {
+    /* count to zero, so the buffer base comes last */
+    for (k = nread; k-- && handle->recv_cb != NULL;) {
+      flags = 0;
+      if (msgs[k].msg_hdr.msg_flags & MSG_TRUNC)
+        flags |= UV_UDP_PARTIAL;
+
+      chunk_buf = uv_buf_init(iov[k].iov_base, iov[k].iov_len);
+      handle->recv_cb(handle, msgs[k].msg_len, &chunk_buf, msgs[k].msg_hdr.msg_name, flags);
+    }
+  }
+}
+#endif
 
 static void uv__udp_recvmsg(uv_udp_t* handle) {
   struct sockaddr_storage peer;
@@ -165,12 +221,20 @@ static void uv__udp_recvmsg(uv_udp_t* handle) {
   h.msg_name = &peer;
 
   do {
-    handle->alloc_cb((uv_handle_t*) handle, 64 * 1024, &buf);
+    handle->alloc_cb((uv_handle_t*) handle, UDP_DGRAM_MAXSIZE, &buf);
     if (buf.len == 0) {
       handle->recv_cb(handle, UV_ENOBUFS, &buf, NULL, 0);
       return;
     }
     assert(buf.base != NULL);
+
+#ifdef ENABLE_RECVMMSG
+    /* Returned space for more than 1 datagram, use it to receive multiple datagrams. */
+    if (buf.len >= 2 * UDP_DGRAM_MAXSIZE) {
+      uv__udp_recvmmsg(handle, &buf);
+      return;
+    }
+#endif
 
     h.msg_namelen = sizeof(peer);
     h.msg_iov = (void*) &buf;
@@ -208,11 +272,61 @@ static void uv__udp_recvmsg(uv_udp_t* handle) {
       && handle->recv_cb != NULL);
 }
 
-
+#if ENABLE_SENDMMSG
 static void uv__udp_sendmsg(uv_udp_t* handle) {
   uv_udp_send_t* req;
+  struct mmsghdr h[MMSG_MAXWIDTH];
   QUEUE* q;
+  ssize_t npkts;
+  int i;
+
+  if (QUEUE_EMPTY(&handle->write_queue)) {
+    return;
+  }
+
+write_queue_drain:
+  for (i = 0; i < MMSG_MAXWIDTH && !QUEUE_EMPTY(&handle->write_queue); ++i) {
+    q = QUEUE_HEAD(&handle->write_queue);
+    assert(q != NULL);
+    req = QUEUE_DATA(q, uv_udp_send_t, queue);
+    assert(req != NULL);
+    
+    memset(&h[i], 0, sizeof(h[i]));
+    h[i].msg_hdr.msg_name = &req->addr;
+    h[i].msg_hdr.msg_namelen = (req->addr.ss_family == AF_INET6 ?
+      sizeof(struct sockaddr_in6) : sizeof(struct sockaddr_in));
+    h[i].msg_hdr.msg_iov = (struct iovec*) req->bufs;
+    h[i].msg_hdr.msg_iovlen = req->nbufs;
+
+    req->status = req->bufs[0].len;
+
+    /* Sending a datagram is an atomic operation: either all data
+     * is written or nothing is (and EMSGSIZE is raised). That is
+     * why we don't handle partial writes. Just pop the request
+     * off the write queue and onto the completed queue, done.
+     */
+    QUEUE_REMOVE(&req->queue);
+    QUEUE_INSERT_TAIL(&handle->write_completed_queue, &req->queue);
+    uv__io_feed(handle->loop, &handle->io_watcher);
+  }
+
+  do {
+    npkts = sendmmsg(handle->io_watcher.fd, h, i, 0);
+  } while (npkts == -1 && errno == EINTR);
+
+  /* TODO: do we need to walk the completed_queue and mark req's as failed? */
+
+  /* couldn't batch everything, continue sending (jump to avoid stack growth) */
+  if (npkts > 0 && !QUEUE_EMPTY(&handle->write_queue)) {
+    goto write_queue_drain;
+  }
+}
+
+#else
+static void uv__udp_sendmsg(uv_udp_t* handle) {
+  uv_udp_send_t* req;
   struct msghdr h;
+  QUEUE* q;
   ssize_t size;
 
   while (!QUEUE_EMPTY(&handle->write_queue)) {
@@ -248,7 +362,7 @@ static void uv__udp_sendmsg(uv_udp_t* handle) {
     uv__io_feed(handle->loop, &handle->io_watcher);
   }
 }
-
+#endif
 
 /* On the BSDs, SO_REUSEPORT implies SO_REUSEADDR but with some additional
  * refinements for programs that use multicast.
